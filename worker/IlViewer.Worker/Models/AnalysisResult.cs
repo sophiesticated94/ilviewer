@@ -23,6 +23,7 @@ public sealed record AnalysisResult
     public IReadOnlyList<InstructionHighlight> InstructionHighlights { get; init; } = [];
     public IReadOnlyList<InstructionExplanation> InstructionExplanations { get; init; } = [];
     public string? SelectedRegionId { get; init; }
+    public bool IsFromCache { get; init; }
 
     public static AnalysisResult Failure(string error)
     {

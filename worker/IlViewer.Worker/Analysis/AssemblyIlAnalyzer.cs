@@ -1,6 +1,12 @@
 using IlViewer.Worker.Models;
 using Mono.Cecil;
+using System.IO;
+using System.Diagnostics;
 using Mono.Cecil.Cil;
+using System.Reflection.Metadata;
+using TypeDefinition = Mono.Cecil.TypeDefinition;
+using MethodDefinition = Mono.Cecil.MethodDefinition;
+using SequencePoint = Mono.Cecil.Cil.SequencePoint;
 
 namespace IlViewer.Worker.Analysis;
 
@@ -31,13 +37,9 @@ public sealed class AssemblyIlAnalyzer : IAssemblyIlAnalyzer
 
     public AnalysisResult Analyze(AnalysisRequest request, ProjectArtifacts artifacts)
     {
-        _cacheManager.OpportunisticCleanup(request.ProjectPath);
+        System.Threading.Tasks.Task.Run(() => _cacheManager.OpportunisticCleanup(request.ProjectPath));
 
-        string mvid;
-        using (var assemblyDef = Mono.Cecil.AssemblyDefinition.ReadAssembly(artifacts.AssemblyPath))
-        {
-            mvid = assemblyDef.MainModule.Mvid.ToString();
-        }
+        string mvid = GetMvid(artifacts.AssemblyPath);
 
         var cachedIndex = _cacheManager.LoadIndex(request.ProjectPath, artifacts, mvid);
         if (cachedIndex is not null)
@@ -616,7 +618,7 @@ public sealed class AssemblyIlAnalyzer : IAssemblyIlAnalyzer
             cachedData.Explanations,
             selectedRegionId,
             isApproximate,
-            message);
+            message) with { IsFromCache = true };
     }
 
     private static bool Overlaps(CachedSequencePoint sp, int startLine, int endLine)
@@ -661,5 +663,16 @@ public sealed class AssemblyIlAnalyzer : IAssemblyIlAnalyzer
             current = current.DeclaringType;
         }
         return current;
+    }
+
+    private static string GetMvid(string assemblyPath)
+    {
+        using (var fs = new FileStream(assemblyPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
+        using (var peReader = new System.Reflection.PortableExecutable.PEReader(fs))
+        {
+            var metadataReader = peReader.GetMetadataReader();
+            var mvidGuid = metadataReader.GetGuid(metadataReader.GetModuleDefinition().Mvid);
+            return mvidGuid.ToString();
+        }
     }
 }
