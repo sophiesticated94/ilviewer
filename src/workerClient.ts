@@ -3,7 +3,7 @@ import * as path from "path";
 import * as vscode from "vscode";
 import { getIlViewerConfiguration } from "./configuration";
 import { runProcess } from "./processRunner";
-import { AnalysisResult, AnalyzeRequest } from "./types";
+import { AnalysisResult, AnalyzeRequest, DecompileRequest, DecompileResult, GraphExpandResult, GraphRequest } from "./types";
 
 interface CachedAnalysis {
   result: AnalysisResult;
@@ -61,7 +61,7 @@ export class WorkerClient {
       this.outputChannel.append(result.stderr);
     }
 
-    const parsed = parseWorkerResult(result.stdout);
+    const parsed = parseWorkerResult<AnalysisResult>(result.stdout);
     if (!parsed && result.exitCode !== 0) {
       throw new Error(result.stderr.trim() || result.stdout.trim() || "IL Viewer worker failed.");
     }
@@ -79,6 +79,72 @@ export class WorkerClient {
 
   public async analyzeOverlay(request: AnalyzeRequest): Promise<AnalysisResult> {
     return this.analyze(request);
+  }
+
+  public async graphRoot(request: GraphRequest): Promise<GraphExpandResult> {
+    return this.runWorkerCommand<GraphExpandResult>([
+      "graph-root",
+      "--project",
+      request.projectPath,
+      "--configuration",
+      request.configuration,
+      "--page-size",
+      request.pageSize.toString(),
+      ...optionalArg("--target-framework", request.targetFramework)
+    ], request.projectPath);
+  }
+
+  public async graphExpand(request: GraphRequest): Promise<GraphExpandResult> {
+    return this.runWorkerCommand<GraphExpandResult>([
+      "graph-expand",
+      "--project",
+      request.projectPath,
+      "--configuration",
+      request.configuration,
+      "--node-id",
+      request.nodeId ?? "",
+      "--page-size",
+      request.pageSize.toString(),
+      ...optionalArg("--target-framework", request.targetFramework),
+      ...optionalArg("--continuation-token", request.continuationToken)
+    ], request.projectPath);
+  }
+
+  public async decompile(request: DecompileRequest): Promise<DecompileResult> {
+    return this.runWorkerCommand<DecompileResult>([
+      "decompile",
+      "--project",
+      request.projectPath,
+      "--configuration",
+      request.configuration,
+      ...optionalArg("--target-framework", request.targetFramework),
+      ...optionalArg("--assembly-path", request.assemblyPath),
+      ...optionalArg("--assembly-name", request.assemblyName),
+      ...optionalArg("--type-name", request.typeName),
+      ...optionalArg("--method-name", request.methodName),
+      ...optionalArg("--metadata-token", request.metadataToken),
+      ...optionalArg("--language", request.language)
+    ], request.projectPath);
+  }
+
+  private async runWorkerCommand<T>(args: string[], projectPath: string): Promise<T> {
+    const configuration = getIlViewerConfiguration();
+    const workerPath = await this.ensureWorkerBuilt(configuration.dotnetPath);
+    const result = await runProcess(configuration.dotnetPath, [workerPath, ...args], path.dirname(projectPath));
+    if (result.stderr.trim()) {
+      this.outputChannel.append(result.stderr);
+    }
+
+    const parsed = parseWorkerResult<T>(result.stdout);
+    if (!parsed && result.exitCode !== 0) {
+      throw new Error(result.stderr.trim() || result.stdout.trim() || "IL Viewer worker failed.");
+    }
+
+    if (!parsed) {
+      throw new Error("IL Viewer worker returned empty or invalid JSON.");
+    }
+
+    return parsed;
   }
 
   private async ensureWorkerBuilt(dotnetPath: string): Promise<string> {
@@ -174,7 +240,11 @@ function statMtimeMs(filePath: string): number {
   }
 }
 
-function parseWorkerResult(stdout: string): AnalysisResult | undefined {
+function optionalArg(name: string, value: string | undefined): string[] {
+  return value ? [name, value] : [];
+}
+
+function parseWorkerResult<T>(stdout: string): T | undefined {
   const trimmed = stdout.trim();
   if (!trimmed) {
     return undefined;
@@ -185,5 +255,5 @@ function parseWorkerResult(stdout: string): AnalysisResult | undefined {
     return undefined;
   }
 
-  return JSON.parse(lastLine) as AnalysisResult;
+  return JSON.parse(lastLine) as T;
 }

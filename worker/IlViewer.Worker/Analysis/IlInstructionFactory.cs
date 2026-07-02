@@ -7,10 +7,12 @@ namespace IlViewer.Worker.Analysis;
 public sealed class IlInstructionFactory
 {
     private readonly IInstructionCatalog _instructionCatalog;
+    private readonly InstructionNavigationTargetFactory _navigationTargetFactory;
 
-    public IlInstructionFactory(IInstructionCatalog instructionCatalog)
+    public IlInstructionFactory(IInstructionCatalog instructionCatalog, InstructionNavigationTargetFactory? navigationTargetFactory = null)
     {
         _instructionCatalog = instructionCatalog;
+        _navigationTargetFactory = navigationTargetFactory ?? new InstructionNavigationTargetFactory();
     }
 
     public IlInstruction Create(
@@ -39,7 +41,8 @@ public sealed class IlInstructionFactory
             instruction.OpCode.StackBehaviourPush.ToString(),
             instruction.OpCode.FlowControl.ToString(),
             _instructionCatalog.Describe(instruction.OpCode),
-            _instructionCatalog.BuildTooltip(instruction, operandDisplay, resolvedSignature));
+            _instructionCatalog.BuildTooltip(instruction, operandDisplay, resolvedSignature),
+            _navigationTargetFactory.Build(candidate, instruction));
     }
 
     public static string BuildMethodId(MethodCandidate candidate)

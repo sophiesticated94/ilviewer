@@ -18,6 +18,8 @@ let hoverOverlay;
 let selectedScopeKind = "function";
 let selectedMethodId;
 let selectedRegionId;
+let graphNodes = new Map();
+let graphEdges = [];
 
 const statusEl = document.getElementById("status");
 const fragmentEl = document.getElementById("fragment");
@@ -27,6 +29,7 @@ const contextMetaEl = document.getElementById("contextMeta");
 const regionsEl = document.getElementById("regions");
 const tabsEl = document.getElementById("tabs");
 const treeEl = document.getElementById("tree");
+const graphEl = document.getElementById("graph");
 const explainButton = document.getElementById("explainButton");
 const explainModal = document.getElementById("explainModal");
 const explainBody = document.getElementById("explainBody");
@@ -61,7 +64,13 @@ window.addEventListener("message", event => {
     hoverOverlay = event.data.overlay;
     render(currentState);
   }
+
+  if (event.data?.type === "graph") {
+    renderGraph(event.data.result, event.data.append, event.data.nodeId);
+  }
 });
+
+vscode.postMessage({ command: "ready" });
 
 function render(state) {
   renderStatus(state);
@@ -118,6 +127,9 @@ function clearPanel(fragmentText, contextText) {
   regionsEl.replaceChildren();
   tabsEl.replaceChildren();
   treeEl.replaceChildren();
+  graphEl.replaceChildren();
+  graphNodes = new Map();
+  graphEdges = [];
 }
 
 function normalizeResult(result) {
@@ -300,8 +312,10 @@ function renderInstructions(container, instructions, emptyText) {
     const depth = highlightMap.get(instruction.id);
     const isHover = hoverSet.has(instruction.id);
     line.className = buildLineClass(instruction, depth, isHover);
+    line.dataset.instructionId = instruction.id;
     line.title = buildInstructionTitle(instruction);
     appendInstructionTokens(line, instruction.text);
+    appendNavigationTargets(line, instruction.navigationTargets || []);
     container.appendChild(line);
     if ((isHover || instruction.isActive || depth !== undefined) && !firstHighlighted) {
       firstHighlighted = line;
@@ -322,6 +336,68 @@ function appendInstructionTokens(line, text) {
   }
 }
 
+function appendNavigationTargets(line, targets) {
+  if (!targets || targets.length === 0) {
+    return;
+  }
+
+  line.classList.add("clickable");
+  line.addEventListener("click", event => {
+    if (event.target?.classList?.contains("nav-target")) {
+      return;
+    }
+    handleNavigationTarget(targets[0]);
+  });
+
+  const primary = targets[0];
+  const button = document.createElement("button");
+  button.className = "nav-target";
+  button.textContent = targetLabel(primary);
+  button.title = targets.map(target => target.label).join("\\n");
+  button.addEventListener("click", event => {
+    event.stopPropagation();
+    handleNavigationTarget(primary);
+  });
+  line.appendChild(button);
+}
+
+function handleNavigationTarget(target) {
+  if (target.kind === "il" && target.targetInstructionId) {
+    scrollToInstruction(target.targetInstructionId);
+    return;
+  }
+
+  vscode.postMessage({ command: "navigateTarget", target });
+}
+
+function scrollToInstruction(instructionId) {
+  const lines = document.querySelectorAll("[data-instruction-id]");
+  for (const line of lines) {
+    if (line.dataset.instructionId === instructionId) {
+      line.classList.add("hover");
+      line.scrollIntoView({ block: "center", inline: "nearest" });
+      setTimeout(() => line.classList.remove("hover"), 1200);
+      return;
+    }
+  }
+}
+
+function targetLabel(target) {
+  if (target.kind === "source") {
+    return "źródło";
+  }
+  if (target.kind === "il") {
+    return "IL";
+  }
+  if (target.assemblyKind === "nuget") {
+    return "NuGet";
+  }
+  if (target.assemblyKind === "framework" || target.assemblyKind === "runtime") {
+    return "runtime";
+  }
+  return "kod";
+}
+
 function buildLineClass(instruction, depth, isHover) {
   const classes = ["line"];
   if (instruction.isActive) {
@@ -332,6 +408,9 @@ function buildLineClass(instruction, depth, isHover) {
   }
   if (isHover) {
     classes.push("hover");
+  }
+  if (instruction.navigationTargets?.length > 0) {
+    classes.push("clickable");
   }
   return classes.join(" ");
 }
@@ -438,7 +517,99 @@ function buildInstructionTitle(instruction) {
   if (instruction.sourceRange) {
     parts.push(sourceRangeText(instruction.sourceRange));
   }
+  if (instruction.navigationTargets?.length > 0) {
+    parts.push("Nawigacja: " + instruction.navigationTargets.map(target => target.label).join(" | "));
+  }
   return parts.join("\\n");
+}
+
+function renderGraph(result, append, parentNodeId) {
+  if (!result) {
+    return;
+  }
+
+  if (!append) {
+    graphNodes = new Map();
+    graphEdges = [];
+  }
+
+  if (!result.success) {
+    graphEl.replaceChildren();
+    renderEmpty(graphEl, result.error || "Nie udało się załadować grafu.");
+    return;
+  }
+
+  for (const node of result.nodes || []) {
+    graphNodes.set(node.id, node);
+  }
+  graphEdges = graphEdges.concat(result.edges || []);
+
+  graphEl.replaceChildren();
+  if (graphNodes.size === 0) {
+    renderEmpty(graphEl, "Graf aplikacji jest pusty.");
+    return;
+  }
+
+  const column = document.createElement("div");
+  column.className = "graph-column";
+  const title = document.createElement("div");
+  title.className = "graph-title";
+  title.textContent = "Graf aplikacji" + (result.rootAssembly ? " | " + result.rootAssembly : "");
+  column.appendChild(title);
+
+  for (const node of graphNodes.values()) {
+    const button = document.createElement("button");
+    button.className = "graph-button";
+    button.title = [node.label, node.assemblyKind, node.signature].filter(Boolean).join("\\n");
+    const kind = document.createElement("span");
+    kind.className = "graph-kind";
+    kind.textContent = "[" + node.assemblyKind + "/" + node.kind + "]";
+    button.appendChild(kind);
+    button.appendChild(document.createTextNode(" " + compactGraphLabel(node.label)));
+    button.addEventListener("click", () => {
+      if (node.hasChildren) {
+        vscode.postMessage({ command: "expandGraph", nodeId: node.id });
+      } else if (node.decompileAvailable) {
+        vscode.postMessage({ command: "navigateTarget", target: graphNodeToTarget(node) });
+      }
+    });
+    column.appendChild(button);
+  }
+
+  if (result.continuationToken && parentNodeId) {
+    const more = document.createElement("button");
+    more.className = "graph-more";
+    more.textContent = "Załaduj więcej";
+    more.addEventListener("click", () => {
+      vscode.postMessage({ command: "expandGraph", nodeId: parentNodeId, continuationToken: result.continuationToken });
+    });
+    column.appendChild(more);
+  }
+
+  graphEl.appendChild(column);
+}
+
+function graphNodeToTarget(node) {
+  return {
+    id: node.id,
+    kind: "decompiled",
+    label: node.label,
+    assemblyName: node.assemblyName,
+    assemblyPath: node.assemblyPath,
+    assemblyKind: node.assemblyKind,
+    typeName: node.typeName,
+    methodName: node.methodName,
+    signature: node.signature,
+    metadataToken: node.metadataToken,
+    sourceRange: node.sourceRange,
+    isExternal: node.isExternal,
+    decompileAvailable: node.decompileAvailable
+  };
+}
+
+function compactGraphLabel(value) {
+  const text = String(value || "");
+  return text.length > 120 ? text.slice(0, 117) + "..." : text;
 }
 
 function sourceRangeText(range) {

@@ -51,4 +51,55 @@ public sealed class CliWorkerTests : WorkerTestBase
         Assert.True(json.RootElement.GetProperty("success").GetBoolean());
         Assert.True(json.RootElement.GetProperty("fragment").GetProperty("instructions").GetArrayLength() > 0);
     }
+
+    [Fact]
+    public async Task CliGraphRootAndDecompile_WriteSuccessfulJsonResults()
+    {
+        using var project = await TemporaryDotnetProject.CreateWithProjectReferenceAsync();
+        var cli = new WorkerCli(ArtifactResolver, Analyzer);
+
+        using var graphStdout = new StringWriter();
+        var graphExitCode = await cli.RunAsync(
+            [
+                "graph-root",
+                "--project",
+                project.ProjectPath,
+                "--configuration",
+                "Debug",
+                "--target-framework",
+                "net8.0"
+            ],
+            graphStdout,
+            TextWriter.Null);
+
+        using var graphJson = JsonDocument.Parse(graphStdout.ToString());
+        Assert.Equal(0, graphExitCode);
+        Assert.True(graphJson.RootElement.GetProperty("success").GetBoolean());
+        Assert.True(graphJson.RootElement.GetProperty("nodes").GetArrayLength() > 0);
+
+        using var decompileStdout = new StringWriter();
+        var decompileExitCode = await cli.RunAsync(
+            [
+                "decompile",
+                "--project",
+                project.ProjectPath,
+                "--configuration",
+                "Debug",
+                "--target-framework",
+                "net8.0",
+                "--assembly-name",
+                "RootApplication",
+                "--type-name",
+                "RootApplication.Entry",
+                "--language",
+                "csharp"
+            ],
+            decompileStdout,
+            TextWriter.Null);
+
+        using var decompileJson = JsonDocument.Parse(decompileStdout.ToString());
+        Assert.Equal(0, decompileExitCode);
+        Assert.True(decompileJson.RootElement.GetProperty("success").GetBoolean());
+        Assert.Contains("class Entry", decompileJson.RootElement.GetProperty("content").GetString(), StringComparison.Ordinal);
+    }
 }

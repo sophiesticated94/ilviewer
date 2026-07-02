@@ -12,7 +12,8 @@ export function getIlViewerConfiguration(): IlViewerConfiguration {
     buildConfiguration: configuration.get<string>("buildConfiguration")?.trim() || "Debug",
     targetFramework,
     projectPath: configuredProjectPath ? resolveWorkspacePath(configuredProjectPath) : undefined,
-    autoOpen: configuration.get<boolean>("autoOpen") ?? false
+    autoOpen: configuration.get<boolean>("autoOpen") ?? false,
+    graphPageSize: Math.max(configuration.get<number>("graphPageSize") ?? 250, 25)
   };
 }
 

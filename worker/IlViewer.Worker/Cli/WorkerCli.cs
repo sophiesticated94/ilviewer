@@ -14,61 +14,81 @@ public sealed class WorkerCli
 
     private readonly IProjectArtifactResolver _artifactResolver;
     private readonly IAssemblyIlAnalyzer _assemblyIlAnalyzer;
+    private readonly IApplicationGraphService _applicationGraphService;
+    private readonly IDecompilationService _decompilationService;
 
-    public WorkerCli(IProjectArtifactResolver artifactResolver, IAssemblyIlAnalyzer assemblyIlAnalyzer)
+    public WorkerCli(
+        IProjectArtifactResolver artifactResolver,
+        IAssemblyIlAnalyzer assemblyIlAnalyzer,
+        IApplicationGraphService? applicationGraphService = null,
+        IDecompilationService? decompilationService = null)
     {
         _artifactResolver = artifactResolver;
         _assemblyIlAnalyzer = assemblyIlAnalyzer;
+        var moduleLoader = new CecilModuleLoader();
+        _applicationGraphService = applicationGraphService ?? new ApplicationGraphService(moduleLoader);
+        _decompilationService = decompilationService ?? new DecompilationService(moduleLoader);
     }
 
     public async Task<int> RunAsync(string[] args, TextWriter stdout, TextWriter stderr)
     {
         if (args.Length == 0 || args.Contains("--help", StringComparer.OrdinalIgnoreCase))
         {
-            await stderr.WriteLineAsync("Usage: IlViewer.Worker analyze --project <path> --document <path> --line <number> [--end-line <number>] [--start-column <number>] [--end-column <number>] [--configuration Debug] [--target-framework net8.0]");
+            await stderr.WriteLineAsync("Usage: IlViewer.Worker <analyze|graph-root|graph-expand|decompile> --project <path> [options]");
             return args.Length == 0 ? 1 : 0;
-        }
-
-        if (!string.Equals(args[0], "analyze", StringComparison.OrdinalIgnoreCase))
-        {
-            await WriteFailureAsync(stdout, $"Unknown command '{args[0]}'.");
-            return 1;
         }
 
         try
         {
-            var request = ParseAnalyzeRequest(args.Skip(1).ToArray());
-            var artifacts = _artifactResolver.Resolve(request);
-            var result = _assemblyIlAnalyzer.Analyze(request, artifacts);
-            await stdout.WriteLineAsync(JsonSerializer.Serialize(result, JsonOptions));
-            return result.Success ? 0 : 2;
+            switch (args[0].ToLowerInvariant())
+            {
+                case "analyze":
+                {
+                    var request = ParseAnalyzeRequest(args.Skip(1).ToArray());
+                    var artifacts = _artifactResolver.Resolve(request);
+                    var result = _assemblyIlAnalyzer.Analyze(request, artifacts);
+                    await stdout.WriteLineAsync(JsonSerializer.Serialize(result, JsonOptions));
+                    return result.Success ? 0 : 2;
+                }
+                case "graph-root":
+                {
+                    var request = ParseGraphRequest(args.Skip(1).ToArray(), requireNodeId: false);
+                    var artifacts = _artifactResolver.Resolve(ToAnalysisRequest(request));
+                    var result = _applicationGraphService.GetRoot(artifacts, request);
+                    await stdout.WriteLineAsync(JsonSerializer.Serialize(result, JsonOptions));
+                    return result.Success ? 0 : 2;
+                }
+                case "graph-expand":
+                {
+                    var request = ParseGraphRequest(args.Skip(1).ToArray(), requireNodeId: true);
+                    var artifacts = _artifactResolver.Resolve(ToAnalysisRequest(request));
+                    var result = _applicationGraphService.Expand(artifacts, request);
+                    await stdout.WriteLineAsync(JsonSerializer.Serialize(result, JsonOptions));
+                    return result.Success ? 0 : 2;
+                }
+                case "decompile":
+                {
+                    var request = ParseDecompileRequest(args.Skip(1).ToArray());
+                    var artifacts = _artifactResolver.Resolve(ToAnalysisRequest(request));
+                    var result = _decompilationService.Decompile(artifacts, request);
+                    await stdout.WriteLineAsync(JsonSerializer.Serialize(result, JsonOptions));
+                    return result.Success ? 0 : 2;
+                }
+                default:
+                    await WriteCommandFailureAsync(stdout, args[0], $"Unknown command '{args[0]}'.");
+                    return 1;
+            }
         }
         catch (Exception exception)
         {
-            await WriteFailureAsync(stdout, exception.Message);
+            await WriteCommandFailureAsync(stdout, args[0], exception.Message);
             return 2;
         }
     }
 
     private static AnalysisRequest ParseAnalyzeRequest(IReadOnlyList<string> args)
     {
-        var options = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-
-        for (var i = 0; i < args.Count; i++)
-        {
-            var key = args[i];
-            if (!key.StartsWith("--", StringComparison.Ordinal))
-            {
-                throw new ArgumentException($"Unexpected argument '{key}'.");
-            }
-
-            if (i + 1 >= args.Count || args[i + 1].StartsWith("--", StringComparison.Ordinal))
-            {
-                throw new ArgumentException($"Missing value for '{key}'.");
-            }
-
-            options[key[2..]] = args[++i];
-        }
+        var options = ReadOptions(args);
 
         var projectPath = Require(options, "project");
         var documentPath = Require(options, "document");
@@ -103,6 +123,106 @@ public sealed class WorkerCli
             endColumn);
     }
 
+    private static GraphRequest ParseGraphRequest(IReadOnlyList<string> args, bool requireNodeId)
+    {
+        var options = ReadOptions(args);
+        var projectPath = Path.GetFullPath(Require(options, "project"));
+        options.TryGetValue("configuration", out var configuration);
+        options.TryGetValue("target-framework", out var targetFramework);
+        options.TryGetValue("node-id", out var nodeId);
+        options.TryGetValue("continuation-token", out var continuationToken);
+        var pageSize = options.TryGetValue("page-size", out var pageSizeValue)
+            ? ParsePositiveInt(pageSizeValue, "page-size")
+            : 250;
+
+        if (requireNodeId && string.IsNullOrWhiteSpace(nodeId))
+        {
+            throw new ArgumentException("Missing required option '--node-id'.");
+        }
+
+        return new GraphRequest(
+            projectPath,
+            string.IsNullOrWhiteSpace(configuration) ? "Debug" : configuration,
+            string.IsNullOrWhiteSpace(targetFramework) ? null : targetFramework,
+            string.IsNullOrWhiteSpace(nodeId) ? null : nodeId,
+            pageSize,
+            string.IsNullOrWhiteSpace(continuationToken) ? null : continuationToken);
+    }
+
+    private static DecompileRequest ParseDecompileRequest(IReadOnlyList<string> args)
+    {
+        var options = ReadOptions(args);
+        var projectPath = Path.GetFullPath(Require(options, "project"));
+        options.TryGetValue("configuration", out var configuration);
+        options.TryGetValue("target-framework", out var targetFramework);
+        options.TryGetValue("assembly-path", out var assemblyPath);
+        options.TryGetValue("assembly-name", out var assemblyName);
+        options.TryGetValue("type-name", out var typeName);
+        options.TryGetValue("method-name", out var methodName);
+        options.TryGetValue("metadata-token", out var metadataToken);
+        options.TryGetValue("language", out var language);
+
+        return new DecompileRequest(
+            projectPath,
+            string.IsNullOrWhiteSpace(configuration) ? "Debug" : configuration,
+            string.IsNullOrWhiteSpace(targetFramework) ? null : targetFramework,
+            string.IsNullOrWhiteSpace(assemblyPath) ? null : Path.GetFullPath(assemblyPath),
+            string.IsNullOrWhiteSpace(assemblyName) ? null : assemblyName,
+            string.IsNullOrWhiteSpace(typeName) ? null : typeName,
+            string.IsNullOrWhiteSpace(methodName) ? null : methodName,
+            string.IsNullOrWhiteSpace(metadataToken) ? null : metadataToken,
+            string.IsNullOrWhiteSpace(language) ? null : language);
+    }
+
+    private static Dictionary<string, string> ReadOptions(IReadOnlyList<string> args)
+    {
+        var options = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+
+        for (var i = 0; i < args.Count; i++)
+        {
+            var key = args[i];
+            if (!key.StartsWith("--", StringComparison.Ordinal))
+            {
+                throw new ArgumentException($"Unexpected argument '{key}'.");
+            }
+
+            if (i + 1 >= args.Count || args[i + 1].StartsWith("--", StringComparison.Ordinal))
+            {
+                throw new ArgumentException($"Missing value for '{key}'.");
+            }
+
+            options[key[2..]] = args[++i];
+        }
+
+        return options;
+    }
+
+    private static AnalysisRequest ToAnalysisRequest(GraphRequest request)
+    {
+        return new AnalysisRequest(
+            request.ProjectPath,
+            request.ProjectPath,
+            1,
+            1,
+            request.Configuration,
+            request.TargetFramework,
+            1,
+            1);
+    }
+
+    private static AnalysisRequest ToAnalysisRequest(DecompileRequest request)
+    {
+        return new AnalysisRequest(
+            request.ProjectPath,
+            request.ProjectPath,
+            1,
+            1,
+            request.Configuration,
+            request.TargetFramework,
+            1,
+            1);
+    }
+
     private static string Require(IReadOnlyDictionary<string, string> options, string key)
     {
         if (options.TryGetValue(key, out var value) && !string.IsNullOrWhiteSpace(value))
@@ -126,6 +246,17 @@ public sealed class WorkerCli
     private static Task WriteFailureAsync(TextWriter stdout, string message)
     {
         var result = AnalysisResult.Failure(message);
+        return stdout.WriteLineAsync(JsonSerializer.Serialize(result, JsonOptions));
+    }
+
+    private static Task WriteCommandFailureAsync(TextWriter stdout, string command, string message)
+    {
+        object result = command.ToLowerInvariant() switch
+        {
+            "graph-root" or "graph-expand" => GraphExpandResult.Failure(message),
+            "decompile" => DecompileResult.Failure(message),
+            _ => AnalysisResult.Failure(message)
+        };
         return stdout.WriteLineAsync(JsonSerializer.Serialize(result, JsonOptions));
     }
 }

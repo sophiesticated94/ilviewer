@@ -16,4 +16,5 @@ public sealed record IlInstruction(
     string? StackBehaviourPush = null,
     string? FlowControl = null,
     string? Description = null,
-    string? Tooltip = null);
+    string? Tooltip = null,
+    IReadOnlyList<IlNavigationTarget>? NavigationTargets = null);

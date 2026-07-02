@@ -12,17 +12,20 @@ public sealed class AssemblyIlAnalyzer : IAssemblyIlAnalyzer
     private readonly IInstructionCatalog _instructionCatalog;
     private readonly IlScopeBuilder _scopeBuilder;
     private readonly InstructionHighlightBuilder _highlightBuilder;
+    private readonly CecilModuleLoader _moduleLoader;
 
     public AssemblyIlAnalyzer(
         ISourceRegionAnalyzer sourceRegionAnalyzer,
         IInstructionCatalog instructionCatalog,
         IlScopeBuilder scopeBuilder,
-        InstructionHighlightBuilder highlightBuilder)
+        InstructionHighlightBuilder highlightBuilder,
+        CecilModuleLoader? moduleLoader = null)
     {
         _sourceRegionAnalyzer = sourceRegionAnalyzer;
         _instructionCatalog = instructionCatalog;
         _scopeBuilder = scopeBuilder;
         _highlightBuilder = highlightBuilder;
+        _moduleLoader = moduleLoader ?? new CecilModuleLoader();
     }
 
     public AnalysisResult Analyze(AnalysisRequest request, ProjectArtifacts artifacts)
@@ -36,11 +39,7 @@ public sealed class AssemblyIlAnalyzer : IAssemblyIlAnalyzer
             {
                 modules.Add(new LoadedModule(
                     artifact,
-                    ModuleDefinition.ReadModule(artifact.AssemblyPath, new ReaderParameters
-                    {
-                        ReadSymbols = true,
-                        ReadingMode = ReadingMode.Deferred
-                    })));
+                    _moduleLoader.LoadModule(artifacts, artifact.AssemblyPath)));
             }
 
             var candidates = modules

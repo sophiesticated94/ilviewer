@@ -110,7 +110,7 @@ section {
 }
 
 .context-section {
-  grid-template-rows: auto auto auto minmax(0, 1fr);
+  grid-template-rows: auto auto auto auto minmax(0, 1fr);
 }
 
 h2 {
@@ -196,6 +196,53 @@ h2 {
   background: var(--vscode-button-background);
 }
 
+.graph {
+  display: flex;
+  gap: 5px;
+  max-height: 142px;
+  overflow: auto;
+  padding: 0 10px 8px;
+  border-bottom: 1px solid var(--vscode-panel-border);
+}
+
+.graph-column {
+  min-width: 210px;
+  max-width: 360px;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.graph-title {
+  color: var(--vscode-descriptionForeground);
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.graph-button,
+.graph-more {
+  min-height: 23px;
+  border: 1px solid var(--vscode-panel-border);
+  border-radius: 3px;
+  color: var(--vscode-button-secondaryForeground);
+  background: var(--vscode-button-secondaryBackground);
+  overflow: hidden;
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.graph-button:hover,
+.graph-more:hover {
+  background: var(--vscode-button-hoverBackground);
+}
+
+.graph-kind {
+  color: var(--vscode-descriptionForeground);
+}
+
 pre {
   min-height: 0;
   margin: 0;
@@ -215,6 +262,10 @@ pre {
   padding: 0 10px;
   border-left: 3px solid transparent;
   white-space: pre;
+}
+
+.line.clickable {
+  cursor: pointer;
 }
 
 .line.active,
@@ -279,6 +330,19 @@ pre {
 
 .token.punctuation {
   color: var(--vscode-descriptionForeground);
+}
+
+.nav-target {
+  display: inline-block;
+  margin-left: 8px;
+  padding: 0 5px;
+  color: var(--vscode-textLink-foreground);
+  background: transparent;
+  border: 1px solid var(--vscode-textLink-foreground);
+  border-radius: 3px;
+  font-size: 0.88em;
+  line-height: 1.2;
+  cursor: pointer;
 }
 
 .empty {

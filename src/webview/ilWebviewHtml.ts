@@ -23,6 +23,7 @@ export function getIlWebviewHtml(webview: vscode.Webview, nonce: string): string
     <button data-command="rebuild" title="Uruchom dotnet build dla wybranego projektu">Przebuduj</button>
     <button class="secondary" data-command="refresh" title="Wyczyść cache i ponownie przeanalizuj aktualne zaznaczenie">Odśwież</button>
     <button class="secondary" data-command="selectProject" title="Wybierz projekt .NET">Projekt</button>
+    <button class="secondary" data-command="openGraph" title="Pokaż lazy graf aplikacji z referencjami NuGet i framework">Graf</button>
     <button id="explainButton" class="secondary" title="Pokaż wyjaśnienia instrukcji IL w aktywnym kontekście">Wyjaśnij IL</button>
     <div id="status" class="status"></div>
   </div>
@@ -38,6 +39,7 @@ export function getIlWebviewHtml(webview: vscode.Webview, nonce: string): string
       <div id="contextMeta" class="meta"></div>
       <div id="tabs" class="tabs"></div>
       <div id="tree" class="tree"></div>
+      <div id="graph" class="graph"></div>
       <pre id="context"></pre>
     </section>
   </main>

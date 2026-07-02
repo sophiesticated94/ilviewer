@@ -1,13 +1,14 @@
 import * as vscode from "vscode";
 import { createAnalyzeRequest } from "./analysisRequestFactory";
 import { getIlViewerConfiguration } from "./configuration";
+import { DecompiledDocumentProvider } from "./decompiledDocumentProvider";
 import { DotnetBuildService } from "./dotnetBuildService";
 import { toHoverOverlay } from "./hoverOverlayMapper";
 import { IlWebviewPanel } from "./ilWebviewPanel";
 import { ProjectDiscovery } from "./projectDiscovery";
 import { SourceContext, SourceContextStore } from "./sourceContextStore";
 import { WorkerClient } from "./workerClient";
-import { PanelState } from "./types";
+import { GraphExpandResult, IlNavigationTarget, PanelState, SourceRange } from "./types";
 
 const SupportedLanguageIds = new Set(["csharp", "fsharp", "vb"]);
 
@@ -16,6 +17,7 @@ export class ExtensionController {
   private readonly projectDiscovery: ProjectDiscovery;
   private readonly buildService: DotnetBuildService;
   private readonly workerClient: WorkerClient;
+  private readonly decompiledDocumentProvider = new DecompiledDocumentProvider();
   private readonly sourceContextStore = new SourceContextStore();
   private readonly panel: IlWebviewPanel;
   private debounceTimer?: NodeJS.Timeout;
@@ -29,17 +31,22 @@ export class ExtensionController {
     this.panel = new IlWebviewPanel(context, {
       rebuild: () => void this.rebuild(),
       refresh: () => void this.refresh(),
-      selectProject: () => void this.selectProject()
+      selectProject: () => void this.selectProject(),
+      openGraph: () => void this.openGraph(),
+      expandGraph: (nodeId, continuationToken) => void this.expandGraph(nodeId, continuationToken),
+      navigateTarget: target => void this.navigateTarget(target)
     });
   }
 
   public activate(): void {
+    this.decompiledDocumentProvider.register(this.context);
     this.context.subscriptions.push(
       this.outputChannel,
       vscode.commands.registerCommand("ilviewer.open", () => this.open()),
       vscode.commands.registerCommand("ilviewer.rebuild", () => this.rebuild()),
       vscode.commands.registerCommand("ilviewer.refresh", () => this.refresh()),
       vscode.commands.registerCommand("ilviewer.selectProject", () => this.selectProject()),
+      vscode.commands.registerCommand("ilviewer.openApplicationGraph", () => this.openGraph()),
       vscode.window.onDidChangeTextEditorSelection(event => this.onSelectionChanged(event)),
       vscode.window.onDidChangeActiveTextEditor(editor => this.onActiveEditorChanged(editor)),
       vscode.workspace.onDidChangeConfiguration(event => {
@@ -65,12 +72,18 @@ export class ExtensionController {
   public async open(): Promise<void> {
     this.panel.show();
     const editor = vscode.window.activeTextEditor;
-    if (!editor || !isSupportedDocument(editor.document)) {
-      this.panel.update(idleState("Otwórz plik C#, F# lub VB.NET."));
+    if (editor && isSupportedDocument(editor.document)) {
+      await this.updateForEditor(editor, true);
       return;
     }
 
-    await this.updateForEditor(editor, true);
+    const sourceContext = this.sourceContextStore.get();
+    if (sourceContext) {
+      await this.updateForSourceContext(sourceContext, true);
+      return;
+    }
+
+    this.panel.update(idleState("Otwórz plik C#, F# lub VB.NET."));
   }
 
   public async rebuild(): Promise<void> {
@@ -133,6 +146,93 @@ export class ExtensionController {
       await this.updateForSourceContext({ ...sourceContext, projectPath: selected }, false);
     } else {
       this.panel.update(idleState("Wybrano projekt. Otwórz plik źródłowy .NET.", selected));
+    }
+  }
+
+  public async openGraph(): Promise<void> {
+    const graphContext = await this.resolveGraphContext(false);
+    if (!graphContext) {
+      this.panel.updateGraph(graphFailure("Otwórz plik C#, F# lub VB.NET przed otwarciem grafu."), false);
+      return;
+    }
+
+    this.panel.show();
+    try {
+      const result = await this.workerClient.graphRoot({
+        projectPath: graphContext.projectPath,
+        configuration: graphContext.configuration.buildConfiguration,
+        targetFramework: graphContext.configuration.targetFramework,
+        pageSize: graphContext.configuration.graphPageSize
+      });
+      this.panel.updateGraph(result, false);
+    } catch (error) {
+      this.panel.updateGraph(graphFailure(error instanceof Error ? error.message : String(error)), false);
+    }
+  }
+
+  public async expandGraph(nodeId: string, continuationToken?: string): Promise<void> {
+    const graphContext = await this.resolveGraphContext(false);
+    if (!graphContext) {
+      this.panel.updateGraph(graphFailure("Nie ma aktywnego projektu dla grafu."), true);
+      return;
+    }
+
+    try {
+      const result = await this.workerClient.graphExpand({
+        projectPath: graphContext.projectPath,
+        configuration: graphContext.configuration.buildConfiguration,
+        targetFramework: graphContext.configuration.targetFramework,
+        nodeId,
+        pageSize: graphContext.configuration.graphPageSize,
+        continuationToken
+      });
+      this.panel.updateGraph(result, true, nodeId);
+    } catch (error) {
+      this.panel.updateGraph(graphFailure(error instanceof Error ? error.message : String(error)), true);
+    }
+  }
+
+  public async navigateTarget(target: IlNavigationTarget): Promise<void> {
+    if (target.sourcePath && target.sourceRange) {
+      await this.openSourceRange(target.sourcePath, target.sourceRange);
+      return;
+    }
+
+    if (target.id && target.kind === "graphNode") {
+      void this.expandGraph(target.id);
+    }
+
+    if (!target.decompileAvailable && !target.assemblyPath && !target.assemblyName) {
+      vscode.window.showInformationMessage("IL Viewer: ten target nie ma źródła ani dostępnej dekompilacji.");
+      return;
+    }
+
+    const graphContext = await this.resolveGraphContext(false);
+    if (!graphContext) {
+      vscode.window.showWarningMessage("IL Viewer: nie ma aktywnego projektu do dekompilacji.");
+      return;
+    }
+
+    try {
+      const result = await this.workerClient.decompile({
+        projectPath: graphContext.projectPath,
+        configuration: graphContext.configuration.buildConfiguration,
+        targetFramework: graphContext.configuration.targetFramework,
+        assemblyPath: target.assemblyPath,
+        assemblyName: target.assemblyName,
+        typeName: target.typeName,
+        methodName: target.methodName,
+        metadataToken: target.metadataToken,
+        language: target.language ?? languageForDocument(graphContext.sourceContext.document)
+      });
+      if (!result.success) {
+        vscode.window.showWarningMessage(`IL Viewer: ${result.error ?? "dekompilacja nie powiodła się."}`);
+        return;
+      }
+
+      await this.decompiledDocumentProvider.open(result.title, result.content, result.language);
+    } catch (error) {
+      vscode.window.showWarningMessage(`IL Viewer: ${error instanceof Error ? error.message : String(error)}`);
     }
   }
 
@@ -258,6 +358,31 @@ export class ExtensionController {
     }
   }
 
+  private async resolveGraphContext(allowPrompt: boolean): Promise<{ sourceContext: SourceContext; projectPath: string; configuration: ReturnType<typeof getIlViewerConfiguration> } | undefined> {
+    const sourceContext = this.getActiveOrStoredSourceContext();
+    if (!sourceContext) {
+      return undefined;
+    }
+
+    const configuration = getIlViewerConfiguration();
+    const projectPath = sourceContext.projectPath
+      ?? await this.projectDiscovery.findProjectForDocument(sourceContext.document, allowPrompt);
+    if (!projectPath) {
+      return undefined;
+    }
+
+    this.sourceContextStore.update(sourceContext.document, sourceContext.start, sourceContext.end, projectPath);
+    return { sourceContext, projectPath, configuration };
+  }
+
+  private async openSourceRange(sourcePath: string, sourceRange: SourceRange): Promise<void> {
+    const document = await vscode.workspace.openTextDocument(vscode.Uri.file(sourcePath));
+    const editor = await vscode.window.showTextDocument(document, vscode.ViewColumn.One, false);
+    const range = toVsCodeRange(sourceRange);
+    editor.selection = new vscode.Selection(range.start, range.end);
+    editor.revealRange(range, vscode.TextEditorRevealType.InCenter);
+  }
+
   private getActiveOrStoredSourceContext(): SourceContext | undefined {
     const editor = vscode.window.activeTextEditor;
     if (editor && isSupportedDocument(editor.document)) {
@@ -342,4 +467,28 @@ function statusForResult(message: string | undefined, projectPath: string, line:
   const range = line === endLine ? `linia ${line}` : `linie ${line}-${endLine}`;
   const base = `Gotowe: ${range}, ${vscode.workspace.asRelativePath(projectPath)}`;
   return message ? `${base}. ${message}` : base;
+}
+
+function graphFailure(error: string): GraphExpandResult {
+  return {
+    success: false,
+    error,
+    nodes: [],
+    edges: [],
+    diagnostics: []
+  };
+}
+
+function toVsCodeRange(sourceRange: SourceRange): vscode.Range {
+  const start = new vscode.Position(Math.max(sourceRange.startLine - 1, 0), Math.max(sourceRange.startColumn - 1, 0));
+  const end = new vscode.Position(Math.max(sourceRange.endLine - 1, 0), Math.max(sourceRange.endColumn - 1, 0));
+  return new vscode.Range(start, end);
+}
+
+function languageForDocument(document: vscode.TextDocument): string {
+  if (document.languageId === "vb") {
+    return "vb";
+  }
+
+  return "csharp";
 }

@@ -1,4 +1,5 @@
 using System.Xml.Linq;
+using System.Text.Json;
 using IlViewer.Worker.Models;
 
 namespace IlViewer.Worker.Artifacts;
@@ -10,6 +11,14 @@ public sealed class ProjectArtifactResolver : IProjectArtifactResolver
         var root = ResolveProject(request.ProjectPath, request.Configuration, request.TargetFramework, isRoot: true, required: true)
             ?? throw new FileNotFoundException("Project assembly was not found.", request.ProjectPath);
         var applicationAssemblies = ResolveApplicationAssemblies(request, root).ToList();
+        var referenceAssemblies = ResolveReferenceAssemblies(root, applicationAssemblies).ToList();
+        var searchDirectories = referenceAssemblies
+            .Select(artifact => Path.GetDirectoryName(artifact.AssemblyPath))
+            .Where(directory => !string.IsNullOrWhiteSpace(directory))
+            .Cast<string>()
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .OrderBy(directory => directory, StringComparer.OrdinalIgnoreCase)
+            .ToList();
 
         return new ProjectArtifacts(
             root.ProjectPath,
@@ -20,7 +29,9 @@ public sealed class ProjectArtifactResolver : IProjectArtifactResolver
             root.AssemblyLastWriteTimeUtc,
             root.PdbLastWriteTimeUtc)
         {
-            ApplicationAssemblies = applicationAssemblies
+            ApplicationAssemblies = applicationAssemblies,
+            ReferenceAssemblies = referenceAssemblies,
+            AssemblySearchDirectories = searchDirectories
         };
     }
 
@@ -113,7 +124,251 @@ public sealed class ProjectArtifactResolver : IProjectArtifactResolver
             configuration,
             File.GetLastWriteTimeUtc(assemblyPath),
             File.GetLastWriteTimeUtc(pdbPath),
-            isRoot);
+            isRoot)
+        {
+            AssemblyKind = isRoot ? AssemblyKinds.Project : AssemblyKinds.ProjectReference
+        };
+    }
+
+    private static IEnumerable<AssemblyArtifact> ResolveReferenceAssemblies(AssemblyArtifact root, IReadOnlyList<AssemblyArtifact> applicationAssemblies)
+    {
+        var byPath = new Dictionary<string, AssemblyArtifact>(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var artifact in applicationAssemblies)
+        {
+            AddArtifact(byPath, artifact);
+        }
+
+        foreach (var artifact in ResolveOutputDirectoryAssemblies(root))
+        {
+            AddArtifact(byPath, artifact);
+        }
+
+        foreach (var artifact in ResolveDepsJsonAssemblies(root))
+        {
+            AddArtifact(byPath, artifact);
+        }
+
+        foreach (var artifact in ResolveSharedRuntimeAssemblies(root))
+        {
+            AddArtifact(byPath, artifact);
+        }
+
+        return byPath.Values
+            .OrderBy(artifact => AssemblyKindOrder(artifact.AssemblyKind))
+            .ThenBy(artifact => artifact.AssemblyName, StringComparer.OrdinalIgnoreCase)
+            .ThenBy(artifact => artifact.AssemblyPath, StringComparer.OrdinalIgnoreCase);
+    }
+
+    private static IEnumerable<AssemblyArtifact> ResolveOutputDirectoryAssemblies(AssemblyArtifact root)
+    {
+        var outputDirectory = Path.GetDirectoryName(root.AssemblyPath);
+        if (string.IsNullOrWhiteSpace(outputDirectory) || !Directory.Exists(outputDirectory))
+        {
+            yield break;
+        }
+
+        foreach (var assemblyPath in Directory.EnumerateFiles(outputDirectory, "*.dll", SearchOption.TopDirectoryOnly))
+        {
+            yield return CreateExternalArtifact(root, assemblyPath, AssemblyKinds.ExternalUnknown);
+        }
+    }
+
+    private static IEnumerable<AssemblyArtifact> ResolveDepsJsonAssemblies(AssemblyArtifact root)
+    {
+        var depsJsonPath = Path.ChangeExtension(root.AssemblyPath, ".deps.json");
+        if (!File.Exists(depsJsonPath))
+        {
+            yield break;
+        }
+
+        using var document = JsonDocument.Parse(File.ReadAllText(depsJsonPath));
+        if (!document.RootElement.TryGetProperty("targets", out var targets)
+            || !document.RootElement.TryGetProperty("libraries", out var libraries))
+        {
+            yield break;
+        }
+
+        var target = targets.EnumerateObject().FirstOrDefault().Value;
+        if (target.ValueKind != JsonValueKind.Object)
+        {
+            yield break;
+        }
+
+        foreach (var libraryTarget in target.EnumerateObject())
+        {
+            if (!libraries.TryGetProperty(libraryTarget.Name, out var library)
+                || !library.TryGetProperty("type", out var typeElement)
+                || !string.Equals(typeElement.GetString(), "package", StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            var packagePath = library.TryGetProperty("path", out var pathElement)
+                ? pathElement.GetString()
+                : libraryTarget.Name.ToLowerInvariant();
+            if (string.IsNullOrWhiteSpace(packagePath))
+            {
+                continue;
+            }
+
+            foreach (var asset in ReadRuntimeAssets(libraryTarget.Value))
+            {
+                var assemblyPath = Path.Combine(GetNuGetPackagesRoot(), ToPlatformPath(packagePath), ToPlatformPath(asset));
+                if (!File.Exists(assemblyPath))
+                {
+                    continue;
+                }
+
+                var (packageName, packageVersion) = SplitPackageIdentity(libraryTarget.Name);
+                var kind = IsRuntimePackage(packageName) ? AssemblyKinds.Runtime : AssemblyKinds.Nuget;
+                yield return CreateExternalArtifact(root, assemblyPath, kind, packageName, packageVersion);
+            }
+        }
+    }
+
+    private static IEnumerable<string> ReadRuntimeAssets(JsonElement libraryTarget)
+    {
+        if (libraryTarget.TryGetProperty("runtime", out var runtime) && runtime.ValueKind == JsonValueKind.Object)
+        {
+            foreach (var property in runtime.EnumerateObject())
+            {
+                if (property.Name.EndsWith(".dll", StringComparison.OrdinalIgnoreCase))
+                {
+                    yield return property.Name;
+                }
+            }
+        }
+
+        if (libraryTarget.TryGetProperty("compile", out var compile) && compile.ValueKind == JsonValueKind.Object)
+        {
+            foreach (var property in compile.EnumerateObject())
+            {
+                if (property.Name.EndsWith(".dll", StringComparison.OrdinalIgnoreCase)
+                    && !property.Name.EndsWith("/_._", StringComparison.Ordinal))
+                {
+                    yield return property.Name;
+                }
+            }
+        }
+    }
+
+    private static IEnumerable<AssemblyArtifact> ResolveSharedRuntimeAssemblies(AssemblyArtifact root)
+    {
+        foreach (var sharedDirectory in GetDotnetSharedDirectories())
+        {
+            var kind = sharedDirectory.Contains("Microsoft.NETCore.App", StringComparison.OrdinalIgnoreCase)
+                ? AssemblyKinds.Runtime
+                : AssemblyKinds.Framework;
+            foreach (var assemblyPath in Directory.EnumerateFiles(sharedDirectory, "*.dll", SearchOption.TopDirectoryOnly))
+            {
+                yield return CreateExternalArtifact(root, assemblyPath, kind);
+            }
+        }
+    }
+
+    private static IEnumerable<string> GetDotnetSharedDirectories()
+    {
+        var dotnetRoots = new[]
+            {
+                Environment.GetEnvironmentVariable("DOTNET_ROOT"),
+                Environment.GetEnvironmentVariable("DOTNET_ROOT(x86)"),
+                Path.GetDirectoryName(Environment.ProcessPath ?? string.Empty),
+                Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "dotnet")
+            }
+            .Where(root => !string.IsNullOrWhiteSpace(root))
+            .Cast<string>()
+            .Select(Path.GetFullPath)
+            .Distinct(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var root in dotnetRoots)
+        {
+            var sharedRoot = Path.Combine(root, "shared");
+            if (!Directory.Exists(sharedRoot))
+            {
+                continue;
+            }
+
+            foreach (var familyDirectory in Directory.EnumerateDirectories(sharedRoot))
+            {
+                foreach (var versionDirectory in Directory.EnumerateDirectories(familyDirectory))
+                {
+                    yield return versionDirectory;
+                }
+            }
+        }
+    }
+
+    private static AssemblyArtifact CreateExternalArtifact(
+        AssemblyArtifact root,
+        string assemblyPath,
+        string assemblyKind,
+        string? packageName = null,
+        string? packageVersion = null)
+    {
+        var fullAssemblyPath = Path.GetFullPath(assemblyPath);
+        var pdbPath = Path.ChangeExtension(fullAssemblyPath, ".pdb");
+        return new AssemblyArtifact(
+            root.ProjectPath,
+            fullAssemblyPath,
+            File.Exists(pdbPath) ? Path.GetFullPath(pdbPath) : null,
+            root.TargetFramework,
+            root.Configuration,
+            File.GetLastWriteTimeUtc(fullAssemblyPath),
+            File.Exists(pdbPath) ? File.GetLastWriteTimeUtc(pdbPath) : null,
+            false)
+        {
+            AssemblyKind = assemblyKind,
+            AssemblyName = Path.GetFileNameWithoutExtension(fullAssemblyPath),
+            PackageName = packageName,
+            PackageVersion = packageVersion
+        };
+    }
+
+    private static void AddArtifact(IDictionary<string, AssemblyArtifact> byPath, AssemblyArtifact artifact)
+    {
+        byPath[Path.GetFullPath(artifact.AssemblyPath)] = artifact;
+    }
+
+    private static int AssemblyKindOrder(string assemblyKind)
+    {
+        return assemblyKind switch
+        {
+            AssemblyKinds.Project => 0,
+            AssemblyKinds.ProjectReference => 1,
+            AssemblyKinds.Nuget => 2,
+            AssemblyKinds.Framework => 3,
+            AssemblyKinds.Runtime => 4,
+            _ => 5
+        };
+    }
+
+    private static string GetNuGetPackagesRoot()
+    {
+        var configured = Environment.GetEnvironmentVariable("NUGET_PACKAGES");
+        if (!string.IsNullOrWhiteSpace(configured))
+        {
+            return configured;
+        }
+
+        return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".nuget", "packages");
+    }
+
+    private static string ToPlatformPath(string value)
+    {
+        return value.Replace('/', Path.DirectorySeparatorChar).Replace('\\', Path.DirectorySeparatorChar);
+    }
+
+    private static (string PackageName, string? PackageVersion) SplitPackageIdentity(string libraryName)
+    {
+        var parts = libraryName.Split('/', 2, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        return parts.Length == 2 ? (parts[0], parts[1]) : (libraryName, null);
+    }
+
+    private static bool IsRuntimePackage(string packageName)
+    {
+        return packageName.StartsWith("runtimepack.", StringComparison.OrdinalIgnoreCase)
+            || packageName.StartsWith("Microsoft.NETCore.App", StringComparison.OrdinalIgnoreCase);
     }
 
     private static string ResolveTargetFramework(XDocument project, string? requestedTargetFramework)

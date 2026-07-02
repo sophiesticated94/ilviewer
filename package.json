@@ -18,7 +18,8 @@
     "onCommand:ilviewer.open",
     "onCommand:ilviewer.rebuild",
     "onCommand:ilviewer.refresh",
-    "onCommand:ilviewer.selectProject"
+    "onCommand:ilviewer.selectProject",
+    "onCommand:ilviewer.openApplicationGraph"
   ],
   "main": "./out/extension.js",
   "contributes": {
@@ -46,6 +47,12 @@
         "title": "IL Viewer: Wybierz projekt",
         "category": "IL Viewer",
         "icon": "$(folder-opened)"
+      },
+      {
+        "command": "ilviewer.openApplicationGraph",
+        "title": "IL Viewer: Graf aplikacji",
+        "category": "IL Viewer",
+        "icon": "$(type-hierarchy)"
       }
     ],
     "menus": {
@@ -84,6 +91,12 @@
           "type": "boolean",
           "default": false,
           "description": "Automatycznie otwieraj panel IL Viewer po wejściu do obsługiwanego pliku .NET."
+        },
+        "ilviewer.graphPageSize": {
+          "type": "number",
+          "default": 250,
+          "minimum": 25,
+          "description": "Liczba węzłów ładowanych w jednej paczce lazy grafu aplikacji."
         }
       }
     }

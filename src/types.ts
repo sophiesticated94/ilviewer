@@ -4,6 +4,7 @@ export interface IlViewerConfiguration {
   targetFramework?: string;
   projectPath?: string;
   autoOpen: boolean;
+  graphPageSize: number;
 }
 
 export interface AnalyzeRequest {
@@ -75,6 +76,27 @@ export interface IlInstruction {
   flowControl?: string;
   description?: string;
   tooltip?: string;
+  navigationTargets?: IlNavigationTarget[];
+}
+
+export interface IlNavigationTarget {
+  id: string;
+  kind: "source" | "il" | "decompiled" | "graphNode";
+  label: string;
+  assemblyName?: string;
+  assemblyPath?: string;
+  assemblyKind?: AssemblyKind;
+  typeName?: string;
+  methodName?: string;
+  signature?: string;
+  metadataToken?: string;
+  ilOffset?: number;
+  targetInstructionId?: string;
+  sourcePath?: string;
+  sourceRange?: SourceRange;
+  language?: string;
+  isExternal: boolean;
+  decompileAvailable: boolean;
 }
 
 export interface IlScope {
@@ -151,6 +173,73 @@ export interface PanelState {
   endLine?: number;
   result?: AnalysisResult;
   hoverOverlay?: HoverOverlay;
+}
+
+export type AssemblyKind = "project" | "projectReference" | "nuget" | "framework" | "runtime" | "externalUnknown";
+
+export interface GraphRequest {
+  projectPath: string;
+  configuration: string;
+  targetFramework?: string;
+  nodeId?: string;
+  pageSize: number;
+  continuationToken?: string;
+}
+
+export interface GraphNode {
+  id: string;
+  kind: "assembly" | "type" | "method" | "external";
+  label: string;
+  assemblyName: string;
+  assemblyKind: AssemblyKind;
+  assemblyPath?: string;
+  typeName?: string;
+  methodName?: string;
+  metadataToken?: string;
+  signature?: string;
+  sourceRange?: SourceRange;
+  hasChildren: boolean;
+  decompileAvailable: boolean;
+  isExternal: boolean;
+}
+
+export interface GraphEdge {
+  from: string;
+  to: string;
+  kind: "contains" | "call" | "field" | "type" | "branch" | "override" | "interfaceImpl";
+  label: string;
+}
+
+export interface GraphExpandResult {
+  success: boolean;
+  error?: string;
+  rootAssembly?: string;
+  nodes: GraphNode[];
+  edges: GraphEdge[];
+  continuationToken?: string;
+  diagnostics: string[];
+}
+
+export interface DecompileRequest {
+  projectPath: string;
+  configuration: string;
+  targetFramework?: string;
+  assemblyPath?: string;
+  assemblyName?: string;
+  typeName?: string;
+  methodName?: string;
+  metadataToken?: string;
+  language?: string;
+}
+
+export interface DecompileResult {
+  success: boolean;
+  error?: string;
+  language: string;
+  title: string;
+  content: string;
+  sourceAvailable: boolean;
+  diagnostics: string[];
 }
 
 export interface ProcessResult {

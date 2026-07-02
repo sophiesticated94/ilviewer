@@ -12,11 +12,15 @@ export class SourceContextStore {
   private current?: SourceContext;
 
   public update(document: vscode.TextDocument, start: vscode.Position, end: vscode.Position, projectPath?: string): SourceContext {
+    const previousProjectPath = this.current?.document.uri.fsPath === document.uri.fsPath
+      ? this.current.projectPath
+      : undefined;
+
     this.current = {
       document,
       start,
       end,
-      projectPath: projectPath ?? this.current?.projectPath,
+      projectPath: projectPath ?? previousProjectPath,
       updatedAt: Date.now()
     };
 
