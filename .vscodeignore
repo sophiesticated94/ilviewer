@@ -1,0 +1,14 @@
+.git/**
+.vscode/**
+node_modules/**
+src/**
+tests/**
+**/*.map
+out/**/*.test.js
+out/**/*.test.js.map
+**/*.csproj.user
+worker/**/obj/**
+worker/**/bin/Debug/**
+README.dev.md
+tsconfig.json
+package-lock.json

@@ -1,0 +1,103 @@
+{
+  "name": "ilviewer",
+  "displayName": "IL Viewer",
+  "description": "Pokazuje Intermediate Language wygenerowany dla aktywnego fragmentu kodu .NET.",
+  "version": "0.1.0",
+  "publisher": "local",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.95.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onLanguage:csharp",
+    "onLanguage:fsharp",
+    "onLanguage:vb",
+    "onCommand:ilviewer.open",
+    "onCommand:ilviewer.rebuild",
+    "onCommand:ilviewer.refresh",
+    "onCommand:ilviewer.selectProject"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "ilviewer.open",
+        "title": "IL Viewer: Otwórz podgląd",
+        "category": "IL Viewer",
+        "icon": "$(preview)"
+      },
+      {
+        "command": "ilviewer.rebuild",
+        "title": "IL Viewer: Przebuduj",
+        "category": "IL Viewer",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "ilviewer.refresh",
+        "title": "IL Viewer: Odśwież",
+        "category": "IL Viewer",
+        "icon": "$(sync)"
+      },
+      {
+        "command": "ilviewer.selectProject",
+        "title": "IL Viewer: Wybierz projekt",
+        "category": "IL Viewer",
+        "icon": "$(folder-opened)"
+      }
+    ],
+    "menus": {
+      "editor/title": [
+        {
+          "command": "ilviewer.open",
+          "when": "resourceLangId == csharp || resourceLangId == fsharp || resourceLangId == vb",
+          "group": "navigation@30"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "IL Viewer",
+      "properties": {
+        "ilviewer.dotnetPath": {
+          "type": "string",
+          "default": "dotnet",
+          "description": "Ścieżka do narzędzia dotnet używana do builda i uruchamiania workera."
+        },
+        "ilviewer.buildConfiguration": {
+          "type": "string",
+          "default": "Debug",
+          "description": "Konfiguracja builda używana przez polecenie Przebuduj."
+        },
+        "ilviewer.targetFramework": {
+          "type": "string",
+          "default": "",
+          "description": "Opcjonalny Target Framework, np. net8.0. Puste pole oznacza pierwszy TFM z projektu."
+        },
+        "ilviewer.projectPath": {
+          "type": "string",
+          "default": "",
+          "description": "Opcjonalna ścieżka do projektu .csproj/.fsproj/.vbproj. Może być absolutna lub względna względem workspace."
+        },
+        "ilviewer.autoOpen": {
+          "type": "boolean",
+          "default": false,
+          "description": "Automatycznie otwieraj panel IL Viewer po wejściu do obsługiwanego pliku .NET."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./ && dotnet build worker/IlViewer.Worker/IlViewer.Worker.csproj -c Release",
+    "watch": "tsc -watch -p ./",
+    "test": "npm run compile && npm run test:ts && dotnet test tests/IlViewer.Worker.Tests/IlViewer.Worker.Tests.csproj",
+    "test:ts": "node out/webview/ilTokenizer.test.js"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "@types/vscode": "^1.95.0",
+    "typescript": "^5.8.0"
+  }
+}
