@@ -21,14 +21,33 @@ export class WorkerClient {
     private readonly outputChannel: vscode.OutputChannel
   ) {}
 
+  private lastMethodResult?: MethodCache;
+
   public clearCache(): void {
     this.cache.clear();
+    this.lastMethodResult = undefined;
   }
 
   public async analyze(request: AnalyzeRequest): Promise<AnalysisResult> {
     const cached = this.getCached(request);
     if (cached) {
       return cached;
+    }
+
+    if (this.lastMethodResult) {
+      const lm = this.lastMethodResult;
+      if (lm.projectPath === request.projectPath && lm.documentPath === request.documentPath) {
+        const sourceRange = lm.result.context?.sourceRange;
+        if (sourceRange && request.line >= sourceRange.startLine && request.line <= sourceRange.endLine) {
+          const assemblyMtimeMs = statMtimeMs(lm.assemblyPath);
+          const pdbMtimeMs = statMtimeMs(lm.pdbPath);
+          if (assemblyMtimeMs === lm.assemblyMtimeMs && pdbMtimeMs === lm.pdbMtimeMs) {
+            const localResult = this.reconstructLocalResult(request, lm.result);
+            this.setCached(request, localResult);
+            return localResult;
+          }
+        }
+      }
     }
 
     const configuration = getIlViewerConfiguration();
@@ -72,13 +91,42 @@ export class WorkerClient {
 
     if (parsed.success && parsed.assemblyPath && parsed.pdbPath) {
       this.setCached(request, parsed);
+
+      if (parsed.context?.sourceRange) {
+        this.lastMethodResult = {
+          projectPath: request.projectPath,
+          documentPath: request.documentPath,
+          result: parsed,
+          assemblyPath: parsed.assemblyPath,
+          pdbPath: parsed.pdbPath,
+          assemblyMtimeMs: statMtimeMs(parsed.assemblyPath),
+          pdbMtimeMs: statMtimeMs(parsed.pdbPath)
+        };
+      }
     }
 
     return parsed;
   }
 
   public async analyzeOverlay(request: AnalyzeRequest): Promise<AnalysisResult> {
-    return this.analyze(request);
+    if (this.lastMethodResult) {
+      const lm = this.lastMethodResult;
+      if (lm.projectPath === request.projectPath && lm.documentPath === request.documentPath) {
+        const sourceRange = lm.result.context?.sourceRange;
+        if (sourceRange && request.line >= sourceRange.startLine && request.line <= sourceRange.endLine) {
+          return this.analyze(request);
+        }
+      }
+    }
+
+    return {
+      success: true,
+      isApproximate: false,
+      scopes: [],
+      sourceRegions: [],
+      instructionHighlights: [],
+      instructionExplanations: []
+    };
   }
 
   public async graphRoot(request: GraphRequest): Promise<GraphExpandResult> {
@@ -217,6 +265,177 @@ export class WorkerClient {
       "IlViewer.Worker.dll"
     );
   }
+
+  private reconstructLocalResult(request: AnalyzeRequest, cachedResult: AnalysisResult): AnalysisResult {
+    const overlaps = (left: any, rightOrStart: any, end?: number) => {
+      if (typeof rightOrStart === "number") {
+        return left.startLine <= end! && left.endLine >= rightOrStart;
+      }
+      return left.startLine <= rightOrStart.endLine && left.endLine >= rightOrStart.startLine;
+    };
+
+    const activeInstructions = (cachedResult.context?.instructions ?? []).map(inst => {
+      const isActive = inst.sourceRange ? overlaps(inst.sourceRange, request.line, request.endLine) : false;
+      return { ...inst, isActive };
+    });
+
+    let activeInsts = activeInstructions.filter(i => i.isActive);
+    let isApproximate = false;
+
+    if (activeInsts.length === 0 && (cachedResult.context?.instructions ?? []).length > 0) {
+      let nearestInst: any = null;
+      let minDistance = Infinity;
+      for (const inst of (cachedResult.context?.instructions ?? [])) {
+        if (inst.sourceRange) {
+          const dist = Math.abs(inst.sourceRange.startLine - request.line);
+          if (dist < minDistance) {
+            minDistance = dist;
+            nearestInst = inst;
+          }
+        }
+      }
+      if (nearestInst) {
+        activeInsts = [{ ...nearestInst, isActive: true }];
+      }
+      isApproximate = true;
+    }
+
+    const fragment = cachedResult.context ? {
+      ...cachedResult.context,
+      instructions: activeInsts,
+      activeInstructionOffsets: activeInsts.map(i => i.offset)
+    } : undefined;
+
+    const contextInstructions = (cachedResult.context?.instructions ?? []).map(inst => {
+      const isActive = activeInsts.some(ai => ai.id === inst.id);
+      return { ...inst, isActive };
+    });
+
+    const context = cachedResult.context ? {
+      ...cachedResult.context,
+      instructions: contextInstructions,
+      activeInstructionOffsets: activeInsts.map(i => i.offset)
+    } : undefined;
+
+    let selectedRegion: any = null;
+    let maxDepth = -1;
+    const nonSelectionRegions = cachedResult.sourceRegions.filter(r => r.kind !== "selection");
+    for (const region of nonSelectionRegions) {
+      if (request.line >= region.sourceRange.startLine && request.line <= region.sourceRange.endLine) {
+        if (region.depth > maxDepth) {
+          maxDepth = region.depth;
+          selectedRegion = region;
+        }
+      }
+    }
+    const selectedRegionId = selectedRegion ? selectedRegion.id : undefined;
+
+    const oldSelectionRegion = cachedResult.sourceRegions.find(r => r.kind === "selection");
+    const oldSelectionId = oldSelectionRegion ? oldSelectionRegion.id : "region-selection";
+
+    const selectionRegion: any = {
+      id: oldSelectionId,
+      kind: "selection",
+      depth: 0,
+      sourceRange: {
+        startLine: request.line,
+        endLine: request.endLine,
+        startColumn: request.startColumn,
+        endColumn: request.endColumn
+      },
+      displayName: "Zaznaczenie",
+      isSelected: true,
+      isExact: true,
+      language: cachedResult.sourceRegions[0]?.language ?? "csharp"
+    };
+
+    const sourceRegions = [
+      selectionRegion,
+      ...nonSelectionRegions.map(region => ({
+        ...region,
+        isSelected: region.id === selectedRegionId
+      }))
+    ];
+
+    const activeInstIds = new Set(activeInsts.map(i => i.id));
+    const activeHighlightIds = new Set(
+      cachedResult.instructionHighlights
+        .filter(h => h.regionId === selectedRegionId)
+        .map(h => h.id)
+    );
+
+    const scopes = cachedResult.scopes.map(scope => {
+      const scopeInstructions = scope.instructions.map(inst => ({
+        ...inst,
+        isActive: activeInstIds.has(inst.id)
+      }));
+
+      const scopeMethods = scope.methods.map(mb => {
+        const mbInstructions = mb.instructions.map(inst => ({
+          ...inst,
+          isActive: activeInstIds.has(inst.id)
+        }));
+        return {
+          ...mb,
+          instructions: mbInstructions,
+          containsActiveInstruction: mbInstructions.some(i => i.isActive)
+        };
+      });
+
+      return {
+        ...scope,
+        instructions: scope.kind === "fragment" ? scopeInstructions.filter(i => i.isActive) : scopeInstructions,
+        methods: scopeMethods,
+        activeInstructionIds: scopeInstructions.filter(i => i.isActive).map(i => i.id),
+        activeHighlightIds: cachedResult.instructionHighlights
+          .filter(h => activeHighlightIds.has(h.id))
+          .map(h => h.id)
+      };
+    });
+
+    const highlights = cachedResult.instructionHighlights.map(h => {
+      const isRegionApprox = isApproximate;
+      const targetRegion = sourceRegions.find(r => r.id === h.regionId);
+      let regionInsts: string[] = [];
+      if (targetRegion) {
+        regionInsts = contextInstructions
+          .filter(i => i.sourceRange && overlaps(i.sourceRange, targetRegion.sourceRange))
+          .map(i => i.id);
+      }
+      if (regionInsts.length === 0 && activeInsts.length > 0) {
+        regionInsts = activeInsts.map(i => i.id);
+      }
+      return {
+        ...h,
+        instructionIds: regionInsts,
+        isApproximate: isRegionApprox
+      };
+    });
+
+    return {
+      ...cachedResult,
+      line: request.line,
+      endLine: request.endLine,
+      isApproximate,
+      fragment,
+      context,
+      sourceRegions,
+      scopes,
+      instructionHighlights: highlights,
+      selectedRegionId,
+      message: isApproximate ? "This line has no direct sequence point. Showing the nearest generated IL in the surrounding method." : undefined
+    };
+  }
+}
+
+interface MethodCache {
+  projectPath: string;
+  documentPath: string;
+  result: AnalysisResult;
+  assemblyPath: string;
+  pdbPath: string;
+  assemblyMtimeMs: number;
+  pdbMtimeMs: number;
 }
 
 function cacheKey(request: AnalyzeRequest): string {

@@ -57,6 +57,95 @@ public sealed class SourceRegionAnalyzer : ISourceRegionAnalyzer
             .ToList();
     }
 
+    public IReadOnlyList<SourceRegion> Analyze(AnalysisRequest request, SourceRange methodSourceRange)
+    {
+        if (!File.Exists(request.DocumentPath))
+        {
+            return [];
+        }
+
+        var source = File.ReadAllText(request.DocumentPath);
+        var text = SourceText.From(source);
+        var selectedSpan = BuildSelectionSpan(text, request);
+        var methodSpan = BuildRangeSpan(text, methodSourceRange);
+        var language = ResolveLanguage(request.DocumentPath);
+
+        var regions = FindInterestingRegions(source, language)
+            .Where(region => methodSpan.Contains(region.Span))
+            .DistinctBy(region => $"{region.Kind}:{region.Span.Start}:{region.Span.Length}")
+            .ToList();
+
+        var selected = new RegionCandidate("selection", selectedSpan, "Zaznaczenie");
+        regions.Insert(0, selected);
+
+        var regionIds = new Dictionary<RegionCandidate, string>();
+        for (var index = 0; index < regions.Count; index++)
+        {
+            regionIds[regions[index]] = $"region-{index}";
+        }
+
+        return regions
+            .Select(region =>
+            {
+                var parent = FindParent(region, regions);
+                var depth = region.Kind == "selection" ? 0 : CalculateDepth(region, regions);
+                return new SourceRegion(
+                    regionIds[region],
+                    region.Kind,
+                    depth,
+                    ToSourceRange(text, region.Span),
+                    parent is null ? null : regionIds[parent],
+                    region.DisplayName,
+                    region.Kind == "selection",
+                    region.Span.Equals(selectedSpan),
+                    language);
+            })
+            .OrderBy(region => region.Depth)
+            .ThenBy(region => region.SourceRange.StartLine)
+            .ThenBy(region => region.SourceRange.StartColumn)
+            .ThenByDescending(region => region.SourceRange.EndLine - region.SourceRange.StartLine)
+            .ToList();
+    }
+
+    public IReadOnlySet<string> GetDeclaredTypeNames(string source, string language)
+    {
+        var names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        if (language == "csharp")
+        {
+            var tree = Microsoft.CodeAnalysis.CSharp.CSharpSyntaxTree.ParseText(source);
+            var root = tree.GetRoot();
+            foreach (var node in root.DescendantNodes().OfType<Microsoft.CodeAnalysis.CSharp.Syntax.BaseTypeDeclarationSyntax>())
+            {
+                names.Add(node.Identifier.Text);
+            }
+        }
+        else if (language == "vb")
+        {
+            var tree = Microsoft.CodeAnalysis.VisualBasic.VisualBasicSyntaxTree.ParseText(source);
+            var root = tree.GetRoot();
+            foreach (var node in root.DescendantNodes().OfType<Microsoft.CodeAnalysis.VisualBasic.Syntax.TypeBlockSyntax>())
+            {
+                names.Add(node.BlockStatement.Identifier.Text);
+            }
+        }
+
+        return names;
+    }
+
+    private static TextSpan BuildRangeSpan(SourceText text, SourceRange range)
+    {
+        var startLine = Math.Clamp(range.StartLine - 1, 0, Math.Max(text.Lines.Count - 1, 0));
+        var endLine = Math.Clamp(range.EndLine - 1, 0, Math.Max(text.Lines.Count - 1, 0));
+        var startColumn = Math.Max(range.StartColumn - 1, 0);
+        var endColumn = Math.Max(range.EndColumn - 1, 0);
+
+        var startPosition = GetPosition(text, startLine, startColumn);
+        var endPosition = GetPosition(text, endLine, endColumn);
+
+        return TextSpan.FromBounds(startPosition, Math.Max(startPosition, endPosition));
+    }
+
     private static IEnumerable<RegionCandidate> FindInterestingRegions(string source, string language)
     {
         return language switch
